@@ -1,9 +1,11 @@
-"""SQLite connection management and schema initialization."""
+"""SQLite connection management, schema initialization, and URL persistence."""
 
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 import sqlite3
+
+from app.utils import encode_base62
 
 
 SCHEMA_SQL = """
@@ -58,6 +60,49 @@ def initialize_database(database_path: str | Path) -> None:
         # initialization avoids asking every request to change journal modes.
         connection.execute("PRAGMA journal_mode = WAL")
         connection.executescript(SCHEMA_SQL)
+
+
+def create_url_record(
+    connection: sqlite3.Connection,
+    original_url: str,
+) -> sqlite3.Row:
+    """Insert an original URL, derive its Base62 code, and return the new row.
+
+    The caller controls the transaction. Inserting first lets SQLite assign the
+    unique integer ID; that ID is then encoded and saved on the same row.
+
+    Args:
+        connection: Open SQLite connection used for the transaction.
+        original_url: Validated destination URL to persist.
+
+    Returns:
+        The complete database row, including its short code and timestamp.
+
+    Raises:
+        sqlite3.DatabaseError: If SQLite cannot provide or retrieve the new row.
+        ValueError: If the generated ID exceeds six-character Base62 capacity.
+    """
+    cursor = connection.execute(
+        "INSERT INTO urls (original_url) VALUES (?)",
+        (original_url,),
+    )
+    url_id = cursor.lastrowid
+    if url_id is None:
+        raise sqlite3.DatabaseError("SQLite did not return an inserted row ID")
+
+    short_code = encode_base62(url_id)
+    connection.execute(
+        "UPDATE urls SET short_code = ? WHERE id = ?",
+        (short_code, url_id),
+    )
+
+    row = connection.execute(
+        "SELECT * FROM urls WHERE id = ?",
+        (url_id,),
+    ).fetchone()
+    if row is None:
+        raise sqlite3.DatabaseError("Inserted URL could not be retrieved")
+    return row
 
 
 @contextmanager
