@@ -96,3 +96,49 @@ def test_shorten_returns_422_for_invalid_payloads(
 
     assert response.status_code == 422
     assert response.json()["detail"]
+
+
+def test_redirect_returns_307_and_preserves_destination(client: TestClient) -> None:
+    """A known code should redirect without changing its destination URL."""
+    destination = "https://example.com/articles/42?source=shortener#section"
+    created = client.post("/shorten", json={"url": destination})
+    short_code = created.json()["short_code"]
+
+    response = client.get(f"/{short_code}", follow_redirects=False)
+
+    assert response.status_code == 307
+    assert response.headers["location"] == destination
+
+
+def test_redirect_increments_click_count_atomically(
+    client: TestClient,
+    database_path: Path,
+) -> None:
+    """Every successful redirect should add exactly one database click."""
+    created = client.post("/shorten", json={"url": "https://example.com/clicks"})
+    short_code = created.json()["short_code"]
+
+    for _ in range(3):
+        response = client.get(f"/{short_code}", follow_redirects=False)
+        assert response.status_code == 307
+
+    with database_connection(database_path) as connection:
+        row = connection.execute(
+            "SELECT clicks FROM urls WHERE short_code = ?",
+            (short_code,),
+        ).fetchone()
+
+    assert row is not None
+    assert row["clicks"] == 3
+
+
+@pytest.mark.parametrize("short_code", ["ABC123", "missing", "000000"])
+def test_redirect_returns_404_for_unknown_code(
+    client: TestClient,
+    short_code: str,
+) -> None:
+    """An unknown code should return a stable JSON error instead of redirecting."""
+    response = client.get(f"/{short_code}", follow_redirects=False)
+
+    assert response.status_code == 404
+    assert response.json() == {"detail": "Short URL not found."}

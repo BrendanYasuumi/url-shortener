@@ -6,14 +6,16 @@ import os
 from pathlib import Path
 import sqlite3
 
-from fastapi import Depends, FastAPI, Request, status
+from fastapi import Depends, FastAPI, HTTPException, Request, status
+from fastapi.responses import RedirectResponse
 
 from app.database import (
     create_url_record,
     database_connection,
     initialize_database,
+    record_click_and_get_url,
 )
-from app.schemas import ShortenRequest, ShortenResponse
+from app.schemas import ErrorResponse, ShortenRequest, ShortenResponse
 
 
 def create_app(database_path: str | Path | None = None) -> FastAPI:
@@ -67,8 +69,39 @@ def create_app(database_path: str | Path | None = None) -> FastAPI:
         return ShortenResponse(
             original_url=row["original_url"],
             short_code=row["short_code"],
-            short_url=f"{request.base_url}{row['short_code']}",
+            short_url=str(
+                request.url_for(
+                    "redirect_to_original_url",
+                    short_code=row["short_code"],
+                )
+            ),
             created_at=row["created_at"],
+        )
+
+    @application.get(
+        "/{short_code}",
+        status_code=status.HTTP_307_TEMPORARY_REDIRECT,
+        response_class=RedirectResponse,
+        responses={404: {"model": ErrorResponse}},
+        tags=["URLs"],
+        summary="Follow a short URL",
+        name="redirect_to_original_url",
+    )
+    def redirect_to_original_url(
+        short_code: str,
+        connection: sqlite3.Connection = Depends(get_connection),
+    ) -> RedirectResponse:
+        """Count a visit and temporarily redirect to the original URL."""
+        original_url = record_click_and_get_url(connection, short_code)
+        if original_url is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Short URL not found.",
+            )
+
+        return RedirectResponse(
+            url=original_url,
+            status_code=status.HTTP_307_TEMPORARY_REDIRECT,
         )
 
     return application

@@ -105,6 +105,38 @@ def create_url_record(
     return row
 
 
+def record_click_and_get_url(
+    connection: sqlite3.Connection,
+    short_code: str,
+) -> str | None:
+    """Increment a short code's click count and return its destination URL.
+
+    Performing ``clicks = clicks + 1`` inside SQLite makes the increment atomic:
+    concurrent requests cannot read the same count and overwrite one another.
+
+    Args:
+        connection: Open SQLite connection used for the transaction.
+        short_code: Code supplied in the redirect request path.
+
+    Returns:
+        The original URL when the code exists, otherwise ``None``.
+    """
+    cursor = connection.execute(
+        "UPDATE urls SET clicks = clicks + 1 WHERE short_code = ?",
+        (short_code,),
+    )
+    if cursor.rowcount == 0:
+        return None
+
+    row = connection.execute(
+        "SELECT original_url FROM urls WHERE short_code = ?",
+        (short_code,),
+    ).fetchone()
+    if row is None:
+        raise sqlite3.DatabaseError("Updated URL could not be retrieved")
+    return str(row["original_url"])
+
+
 @contextmanager
 def database_connection(
     database_path: str | Path,

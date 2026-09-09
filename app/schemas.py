@@ -28,3 +28,9 @@ class ShortenResponse(BaseModel):
     )
     short_url: HttpUrl
     created_at: datetime
+
+
+class ErrorResponse(BaseModel):
+    """Describe the standard error body returned by FastAPI."""
+
+    detail: str
