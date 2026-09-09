@@ -144,6 +144,19 @@ def test_short_code_has_explicit_index(database_path: Path) -> None:
     assert "idx_urls_short_code" in index_names
 
 
+def test_short_code_lookup_uses_an_index(database_path: Path) -> None:
+    """SQLite's query planner should avoid a full table scan for code lookup."""
+    initialize_database(database_path)
+    with database_connection(database_path) as connection:
+        rows = connection.execute(
+            "EXPLAIN QUERY PLAN SELECT * FROM urls WHERE short_code = ?",
+            ("000001",),
+        ).fetchall()
+
+    query_details = " ".join(row["detail"] for row in rows)
+    assert "USING INDEX" in query_details
+
+
 def test_click_count_cannot_be_negative(database_path: Path) -> None:
     """The database constraint should reject invalid analytics state."""
     initialize_database(database_path)

@@ -1,8 +1,10 @@
 """Integration tests for the FastAPI URL creation endpoint."""
 
 from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
+import sqlite3
 
 import pytest
 from fastapi.testclient import TestClient
@@ -202,3 +204,69 @@ def test_analytics_returns_404_for_unknown_code(
 
     assert response.status_code == 404
     assert response.json() == {"detail": "Short URL not found."}
+
+
+def test_concurrent_redirects_do_not_lose_clicks(client: TestClient) -> None:
+    """Overlapping redirect requests should each contribute exactly one click."""
+    created = client.post(
+        "/shorten",
+        json={"url": "https://example.com/concurrent"},
+    ).json()
+    short_code = created["short_code"]
+    request_count = 50
+
+    def follow_short_url(_: int) -> int:
+        response = client.get(f"/{short_code}", follow_redirects=False)
+        return response.status_code
+
+    with ThreadPoolExecutor(max_workers=10) as executor:
+        status_codes = list(executor.map(follow_short_url, range(request_count)))
+
+    analytics = client.get(f"/analytics/{short_code}")
+
+    assert status_codes == [307] * request_count
+    assert analytics.status_code == 200
+    assert analytics.json()["clicks"] == request_count
+
+
+def test_url_data_survives_application_restart(database_path: Path) -> None:
+    """Committed URLs should remain available after the server lifecycle ends."""
+    with TestClient(create_app(database_path)) as first_client:
+        created = first_client.post(
+            "/shorten",
+            json={"url": "https://example.com/persistent"},
+        ).json()
+        first_client.get(f"/{created['short_code']}", follow_redirects=False)
+
+    with TestClient(create_app(database_path)) as restarted_client:
+        analytics = restarted_client.get(
+            f"/analytics/{created['short_code']}"
+        )
+
+    assert analytics.status_code == 200
+    assert analytics.json()["original_url"] == "https://example.com/persistent"
+    assert analytics.json()["clicks"] == 1
+
+
+def test_database_errors_return_safe_503_response(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Internal SQLite details should be logged rather than exposed to clients."""
+    internal_message = "private database failure details"
+
+    def fail_to_create_url(*_: object) -> None:
+        raise sqlite3.OperationalError(internal_message)
+
+    monkeypatch.setattr("app.main.create_url_record", fail_to_create_url)
+
+    response = client.post(
+        "/shorten",
+        json={"url": "https://example.com/database-error"},
+    )
+
+    assert response.status_code == 503
+    assert response.json() == {
+        "detail": "The database is temporarily unavailable."
+    }
+    assert internal_message not in response.text

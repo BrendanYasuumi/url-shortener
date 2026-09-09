@@ -2,12 +2,13 @@
 
 from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager
+import logging
 import os
 from pathlib import Path
 import sqlite3
 
 from fastapi import Depends, FastAPI, HTTPException, Request, status
-from fastapi.responses import RedirectResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 
 from app.database import (
     create_url_record,
@@ -22,6 +23,8 @@ from app.schemas import (
     ShortenRequest,
     ShortenResponse,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def create_app(database_path: str | Path | None = None) -> FastAPI:
@@ -53,6 +56,18 @@ def create_app(database_path: str | Path | None = None) -> FastAPI:
         with database_connection(configured_path) as connection:
             yield connection
 
+    @application.exception_handler(sqlite3.DatabaseError)
+    async def handle_database_error(
+        request: Request,
+        _: sqlite3.DatabaseError,
+    ) -> JSONResponse:
+        """Log database failures while returning clients a safe response."""
+        logger.exception("Database failure while handling %s", request.url.path)
+        return JSONResponse(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            content={"detail": "The database is temporarily unavailable."},
+        )
+
     @application.get("/")
     def read_root() -> dict[str, str]:
         """Return a small response proving that the API is running."""
@@ -62,6 +77,7 @@ def create_app(database_path: str | Path | None = None) -> FastAPI:
         "/shorten",
         response_model=ShortenResponse,
         status_code=status.HTTP_201_CREATED,
+        responses={503: {"model": ErrorResponse}},
         tags=["URLs"],
         summary="Create a short URL",
     )
@@ -87,7 +103,10 @@ def create_app(database_path: str | Path | None = None) -> FastAPI:
     @application.get(
         "/analytics/{short_code}",
         response_model=AnalyticsResponse,
-        responses={404: {"model": ErrorResponse}},
+        responses={
+            404: {"model": ErrorResponse},
+            503: {"model": ErrorResponse},
+        },
         tags=["Analytics"],
         summary="Read short URL analytics",
     )
@@ -114,7 +133,10 @@ def create_app(database_path: str | Path | None = None) -> FastAPI:
         "/{short_code}",
         status_code=status.HTTP_307_TEMPORARY_REDIRECT,
         response_class=RedirectResponse,
-        responses={404: {"model": ErrorResponse}},
+        responses={
+            404: {"model": ErrorResponse},
+            503: {"model": ErrorResponse},
+        },
         tags=["URLs"],
         summary="Follow a short URL",
         name="redirect_to_original_url",
