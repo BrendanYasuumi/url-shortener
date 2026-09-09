@@ -30,6 +30,19 @@ class ShortenResponse(BaseModel):
     created_at: datetime
 
 
+class AnalyticsResponse(BaseModel):
+    """Describe stored metadata and usage for one short URL."""
+
+    original_url: HttpUrl
+    short_code: str = Field(
+        min_length=6,
+        max_length=6,
+        pattern=r"^[0-9a-zA-Z]{6}$",
+    )
+    clicks: int = Field(ge=0, description="Total successful redirects")
+    created_at: datetime
+
+
 class ErrorResponse(BaseModel):
     """Describe the standard error body returned by FastAPI."""
 

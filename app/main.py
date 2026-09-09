@@ -12,10 +12,16 @@ from fastapi.responses import RedirectResponse
 from app.database import (
     create_url_record,
     database_connection,
+    find_url_by_short_code,
     initialize_database,
     record_click_and_get_url,
 )
-from app.schemas import ErrorResponse, ShortenRequest, ShortenResponse
+from app.schemas import (
+    AnalyticsResponse,
+    ErrorResponse,
+    ShortenRequest,
+    ShortenResponse,
+)
 
 
 def create_app(database_path: str | Path | None = None) -> FastAPI:
@@ -75,6 +81,32 @@ def create_app(database_path: str | Path | None = None) -> FastAPI:
                     short_code=row["short_code"],
                 )
             ),
+            created_at=row["created_at"],
+        )
+
+    @application.get(
+        "/analytics/{short_code}",
+        response_model=AnalyticsResponse,
+        responses={404: {"model": ErrorResponse}},
+        tags=["Analytics"],
+        summary="Read short URL analytics",
+    )
+    def get_analytics(
+        short_code: str,
+        connection: sqlite3.Connection = Depends(get_connection),
+    ) -> AnalyticsResponse:
+        """Return stored metadata and total clicks without changing them."""
+        row = find_url_by_short_code(connection, short_code)
+        if row is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Short URL not found.",
+            )
+
+        return AnalyticsResponse(
+            original_url=row["original_url"],
+            short_code=row["short_code"],
+            clicks=row["clicks"],
             created_at=row["created_at"],
         )
 

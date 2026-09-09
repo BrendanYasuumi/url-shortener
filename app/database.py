@@ -105,6 +105,25 @@ def create_url_record(
     return row
 
 
+def find_url_by_short_code(
+    connection: sqlite3.Connection,
+    short_code: str,
+) -> sqlite3.Row | None:
+    """Return the URL row matching a short code through the indexed column.
+
+    Args:
+        connection: Open SQLite connection used for the query.
+        short_code: Code whose stored metadata should be retrieved.
+
+    Returns:
+        The matching row, or ``None`` when the code does not exist.
+    """
+    return connection.execute(
+        "SELECT * FROM urls WHERE short_code = ?",
+        (short_code,),
+    ).fetchone()
+
+
 def record_click_and_get_url(
     connection: sqlite3.Connection,
     short_code: str,

@@ -142,3 +142,63 @@ def test_redirect_returns_404_for_unknown_code(
 
     assert response.status_code == 404
     assert response.json() == {"detail": "Short URL not found."}
+
+
+def test_analytics_returns_created_url_metadata(client: TestClient) -> None:
+    """Analytics should expose the URL, code, initial clicks, and timestamp."""
+    destination = "https://example.com/analytics"
+    created = client.post("/shorten", json={"url": destination}).json()
+
+    response = client.get(f"/analytics/{created['short_code']}")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "original_url": destination,
+        "short_code": created["short_code"],
+        "clicks": 0,
+        "created_at": created["created_at"],
+    }
+
+
+def test_analytics_reports_successful_redirects(client: TestClient) -> None:
+    """The analytics total should reflect every successful redirect."""
+    created = client.post(
+        "/shorten",
+        json={"url": "https://example.com/analytics-clicks"},
+    ).json()
+    short_code = created["short_code"]
+
+    for _ in range(3):
+        client.get(f"/{short_code}", follow_redirects=False)
+
+    response = client.get(f"/analytics/{short_code}")
+
+    assert response.status_code == 200
+    assert response.json()["clicks"] == 3
+
+
+def test_reading_analytics_does_not_increment_clicks(client: TestClient) -> None:
+    """Analytics reads are not redirects and should not count as visits."""
+    created = client.post(
+        "/shorten",
+        json={"url": "https://example.com/read-only-analytics"},
+    ).json()
+    endpoint = f"/analytics/{created['short_code']}"
+
+    first = client.get(endpoint)
+    second = client.get(endpoint)
+
+    assert first.json()["clicks"] == 0
+    assert second.json()["clicks"] == 0
+
+
+@pytest.mark.parametrize("short_code", ["ABC123", "missing", "000000"])
+def test_analytics_returns_404_for_unknown_code(
+    client: TestClient,
+    short_code: str,
+) -> None:
+    """Unknown analytics codes should use the standard not-found response."""
+    response = client.get(f"/analytics/{short_code}")
+
+    assert response.status_code == 404
+    assert response.json() == {"detail": "Short URL not found."}
