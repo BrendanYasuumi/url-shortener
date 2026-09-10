@@ -1,0 +1,289 @@
+{
+  "info": {
+    "_postman_id": "eec8e555-6fb8-4fb5-a6e9-3b2ba4c04ad6",
+    "name": "URL Shortener API",
+    "description": "Requests and executable checks for the URL Shortener API. Run the collection in order so the creation request can save its generated short code for the redirect and analytics requests.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "item": [
+    {
+      "name": "Happy path",
+      "description": "A complete create, redirect, and analytics workflow.",
+      "item": [
+        {
+          "name": "Check API health",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status code is 200\", function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});",
+                  "",
+                  "pm.test(\"Response confirms the running service\", function () {",
+                  "    pm.expect(pm.response.json()).to.deep.equal({",
+                  "        message: \"URL Shortener API is running\"",
+                  "    });",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "description": "Confirm that the FastAPI process is accepting requests.",
+            "url": "{{base_url}}/"
+          },
+          "response": []
+        },
+        {
+          "name": "Create short URL",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status code is 201\", function () {",
+                  "    pm.response.to.have.status(201);",
+                  "});",
+                  "",
+                  "const body = pm.response.json();",
+                  "",
+                  "pm.test(\"Response contains a six-character Base62 code\", function () {",
+                  "    pm.expect(body.short_code).to.match(/^[0-9a-zA-Z]{6}$/);",
+                  "});",
+                  "",
+                  "pm.test(\"Response describes the created URL\", function () {",
+                  "    pm.expect(body.original_url).to.equal(pm.variables.get(\"destination_url\"));",
+                  "    pm.expect(body.short_url.slice(-7)).to.equal(\"/\" + body.short_code);",
+                  "    pm.expect(body.created_at).to.be.a(\"string\");",
+                  "});",
+                  "",
+                  "pm.collectionVariables.set(\"short_code\", body.short_code);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"url\": \"{{destination_url}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "Create a short URL and save its code as the collection-scoped short_code variable.",
+            "url": "{{base_url}}/shorten"
+          },
+          "response": []
+        },
+        {
+          "name": "Use short URL",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status code is 307\", function () {",
+                  "    pm.response.to.have.status(307);",
+                  "});",
+                  "",
+                  "pm.test(\"Location header preserves the destination\", function () {",
+                  "    pm.expect(pm.response.headers.get(\"Location\")).to.equal(",
+                  "        pm.variables.get(\"destination_url\")",
+                  "    );",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "protocolProfileBehavior": {
+            "followRedirects": false
+          },
+          "request": {
+            "method": "GET",
+            "header": [],
+            "description": "Record one click and inspect the 307 response without visiting the external destination.",
+            "url": "{{base_url}}/{{short_code}}"
+          },
+          "response": []
+        },
+        {
+          "name": "Read analytics",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status code is 200\", function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});",
+                  "",
+                  "const body = pm.response.json();",
+                  "",
+                  "pm.test(\"Analytics identify the created URL\", function () {",
+                  "    pm.expect(body.short_code).to.equal(pm.variables.get(\"short_code\"));",
+                  "    pm.expect(body.original_url).to.equal(pm.variables.get(\"destination_url\"));",
+                  "});",
+                  "",
+                  "pm.test(\"The redirect recorded exactly one click\", function () {",
+                  "    pm.expect(body.clicks).to.equal(1);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "description": "Read the metadata and click count for the URL created earlier in this run.",
+            "url": "{{base_url}}/analytics/{{short_code}}"
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Error handling",
+      "description": "Requests that intentionally exercise validation and missing-resource responses.",
+      "item": [
+        {
+          "name": "Reject invalid URL",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status code is 422\", function () {",
+                  "    pm.response.to.have.status(422);",
+                  "});",
+                  "",
+                  "pm.test(\"Response contains validation details\", function () {",
+                  "    pm.expect(pm.response.json().detail).to.be.an(\"array\").that.is.not.empty;",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"url\": \"not-a-valid-url\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "Demonstrate Pydantic rejecting a value that is not an absolute HTTP or HTTPS URL.",
+            "url": "{{base_url}}/shorten"
+          },
+          "response": []
+        },
+        {
+          "name": "Reject unknown short code",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status code is 404\", function () {",
+                  "    pm.response.to.have.status(404);",
+                  "});",
+                  "",
+                  "pm.test(\"Response explains that the URL was not found\", function () {",
+                  "    pm.expect(pm.response.json()).to.deep.equal({",
+                  "        detail: \"Short URL not found.\"",
+                  "    });",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "protocolProfileBehavior": {
+            "followRedirects": false
+          },
+          "request": {
+            "method": "GET",
+            "header": [],
+            "description": "Request a short code that does not exist.",
+            "url": "{{base_url}}/missing"
+          },
+          "response": []
+        },
+        {
+          "name": "Reject analytics for unknown short code",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status code is 404\", function () {",
+                  "    pm.response.to.have.status(404);",
+                  "});",
+                  "",
+                  "pm.test(\"Response explains that the URL was not found\", function () {",
+                  "    pm.expect(pm.response.json()).to.deep.equal({",
+                  "        detail: \"Short URL not found.\"",
+                  "    });",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "description": "Request analytics for a short code that does not exist.",
+            "url": "{{base_url}}/analytics/missing"
+          },
+          "response": []
+        }
+      ]
+    }
+  ],
+  "variable": [
+    {
+      "key": "base_url",
+      "value": "http://127.0.0.1:8000",
+      "type": "string"
+    },
+    {
+      "key": "destination_url",
+      "value": "https://example.com/postman-demo?source=postman",
+      "type": "string"
+    },
+    {
+      "key": "short_code",
+      "value": "000001",
+      "type": "string"
+    }
+  ]
+}

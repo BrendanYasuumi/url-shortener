@@ -18,6 +18,7 @@ HTTP interface and Python's standard `sqlite3` driver for persistent storage.
 - Configurable 500-request concurrent benchmark
 - Multi-stage, non-root Docker image with persistent storage and health checks
 - Continuous integration for automated tests and container smoke testing
+- Reusable Postman collection with success and error-response checks
 
 ## Architecture
 
@@ -32,6 +33,9 @@ url-shortener/
 │   ├── main.py           # FastAPI application, dependencies, and routes
 │   ├── schemas.py        # Pydantic request and response contracts
 │   └── utils.py          # Fixed-width Base62 encoding and decoding
+├── postman/
+│   ├── Local.postman_environment.json
+│   └── URL Shortener API.postman_collection.json
 ├── tests/
 │   ├── test_benchmark.py
 │   ├── test_database.py
@@ -123,6 +127,28 @@ curl http://127.0.0.1:8000/analytics/000001
   "created_at": "2026-09-09T12:00:00"
 }
 ```
+
+## Postman
+
+The [`postman`](postman) directory contains a Collection v2.1 file and a local
+environment. To exercise the API manually:
+
+1. Start the development server with `uvicorn app.main:app --reload`.
+2. In Postman, select **Import** and import both JSON files from `postman/`.
+3. Select the **URL Shortener - Local** environment.
+4. Open the **URL Shortener API** collection and run it with the Collection
+   Runner.
+
+Run the requests in their saved order. The creation request stores the newly
+generated `short_code` as a collection variable, which the redirect and
+analytics requests then reuse. Redirect following is disabled for redirect
+checks, so Postman inspects the API's `307` response without contacting the
+external destination.
+
+The seven saved requests check the complete successful workflow as well as
+invalid-URL and unknown-code errors. Their post-response scripts verify status
+codes, response bodies, the `Location` header, the Base62 code format, and the
+recorded click count.
 
 ## Local development
 
