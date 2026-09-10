@@ -19,6 +19,7 @@ HTTP interface and Python's standard `sqlite3` driver for persistent storage.
 - Multi-stage, non-root Docker image with persistent storage and health checks
 - Continuous integration for automated tests and container smoke testing
 - Reusable Postman collection with success and error-response checks
+- Structured JSON request logs with correlation IDs and response timing
 
 ## Architecture
 
@@ -30,6 +31,7 @@ url-shortener/
 ├── app/
 │   ├── __init__.py
 │   ├── database.py       # Schema, connection lifecycle, transactions, queries
+│   ├── logging_config.py # Structured application logging configuration
 │   ├── main.py           # FastAPI application, dependencies, and routes
 │   ├── schemas.py        # Pydantic request and response contracts
 │   └── utils.py          # Fixed-width Base62 encoding and decoding
@@ -78,6 +80,13 @@ Interactive OpenAPI documentation is available from a running server at
 Invalid request bodies return `422`. Unknown short codes return `404`.
 Unexpected SQLite failures are logged internally and returned as a safe `503`
 without exposing database details.
+
+Every response includes two observability headers:
+
+| Header | Description |
+|---|---|
+| `X-Request-ID` | Caller-provided safe correlation ID or a generated UUID |
+| `X-Process-Time-Ms` | Time spent processing the request inside the API |
 
 ### Create a short URL
 
@@ -149,6 +158,25 @@ The seven saved requests check the complete successful workflow as well as
 invalid-URL and unknown-code errors. Their post-response scripts verify status
 codes, response bodies, the `Location` header, the Base62 code format, and the
 recorded click count.
+
+## Observability
+
+Application request and error events are written to standard output as
+single-line JSON. Each record includes a UTC timestamp, severity, event name,
+HTTP method, path, status, processing duration, and request ID. Query strings
+are intentionally excluded to reduce the chance of logging private input.
+
+Example request log:
+
+```json
+{"timestamp":"2026-09-10T12:00:00.000Z","level":"INFO","logger":"url_shortener","message":"Request completed","event":"request_completed","request_id":"79536f71-035b-4292-af95-7a27a1546760","method":"GET","path":"/","status_code":200,"duration_ms":0.482}
+```
+
+Clients can send an `X-Request-ID` containing up to 128 letters, digits,
+periods, underscores, or hyphens. The API returns the same value, allowing one
+request to be traced across client and server logs. Other values are replaced
+with generated UUIDs. Unexpected exceptions are logged with their stack traces
+but produce a safe `500` response that does not reveal internal details.
 
 ## Local development
 
@@ -243,7 +271,7 @@ Run the complete suite with:
 pytest -v
 ```
 
-The current suite contains 78 collected cases covering:
+The current suite contains 83 collected cases covering:
 
 - request validation;
 - Base62 boundaries, failures, and round trips;
@@ -254,7 +282,8 @@ The current suite contains 78 collected cases covering:
 - status codes and redirect headers;
 - click analytics;
 - safe database failures;
-- overlapping redirect correctness; and
+- overlapping redirect correctness;
+- request correlation, timing, and structured failure logging; and
 - benchmark percentile calculations.
 
 Every API test receives a new temporary SQLite file, so tests never modify the
@@ -277,10 +306,11 @@ pushed to the same branch.
 
 ## Benchmark
 
-Start the API without development reload or access-log overhead:
+Start the API without development reload or per-request logging overhead:
 
 ```bash
 URL_SHORTENER_DB_PATH=benchmark.db \
+  URL_SHORTENER_LOG_LEVEL=WARNING \
   uvicorn app.main:app --no-access-log
 ```
 
@@ -361,6 +391,7 @@ and creation timestamp.
 | Environment variable | Default | Description |
 |---|---|---|
 | `URL_SHORTENER_DB_PATH` | `urls.db` locally, `/data/urls.db` in Docker | SQLite file location |
+| `URL_SHORTENER_LOG_LEVEL` | `INFO` | Application log threshold, such as `DEBUG`, `INFO`, or `WARNING` |
 
 The public short URL is generated from the host and scheme of the creation
 request. A deployment behind a reverse proxy must configure trusted forwarded

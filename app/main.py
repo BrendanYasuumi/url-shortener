@@ -2,13 +2,16 @@
 
 from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager
-import logging
 import os
 from pathlib import Path
+import re
 import sqlite3
+from time import perf_counter
+from uuid import uuid4
 
 from fastapi import Depends, FastAPI, HTTPException, Request, status
-from fastapi.responses import JSONResponse, RedirectResponse
+from fastapi.responses import JSONResponse, RedirectResponse, Response
+from starlette.middleware.base import RequestResponseEndpoint
 
 from app.database import (
     create_url_record,
@@ -17,6 +20,7 @@ from app.database import (
     initialize_database,
     record_click_and_get_url,
 )
+from app.logging_config import logger
 from app.schemas import (
     AnalyticsResponse,
     ErrorResponse,
@@ -24,7 +28,36 @@ from app.schemas import (
     ShortenResponse,
 )
 
-logger = logging.getLogger(__name__)
+REQUEST_ID_PATTERN = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
+
+
+def resolve_request_id(candidate: str | None) -> str:
+    """Return a safe caller-provided request ID or generate a new UUID.
+
+    Restricting accepted characters prevents control characters or excessively
+    large values from being reflected into response headers and log records.
+    """
+    if candidate is not None and REQUEST_ID_PATTERN.fullmatch(candidate):
+        return candidate
+    return str(uuid4())
+
+
+def request_log_context(
+    request: Request,
+    request_id: str,
+    status_code: int,
+    duration_ms: float,
+) -> dict[str, object]:
+    """Build the shared structured fields for one completed HTTP request."""
+    return {
+        "event": "request_completed",
+        "request_id": request_id,
+        "method": request.method,
+        # Exclude the query string because it can contain private user data.
+        "path": request.url.path,
+        "status_code": status_code,
+        "duration_ms": round(duration_ms, 3),
+    }
 
 
 def create_app(database_path: str | Path | None = None) -> FastAPI:
@@ -51,6 +84,53 @@ def create_app(database_path: str | Path | None = None) -> FastAPI:
         lifespan=lifespan,
     )
 
+    @application.middleware("http")
+    async def observe_request(
+        request: Request,
+        call_next: RequestResponseEndpoint,
+    ) -> Response:
+        """Correlate, time, and log every API request and response."""
+        request_id = resolve_request_id(request.headers.get("X-Request-ID"))
+        request.state.request_id = request_id
+        started = perf_counter()
+
+        try:
+            response = await call_next(request)
+        except Exception as error:
+            duration_ms = (perf_counter() - started) * 1_000
+            context = request_log_context(
+                request,
+                request_id,
+                status.HTTP_500_INTERNAL_SERVER_ERROR,
+                duration_ms,
+            )
+            context["event"] = "request_failed"
+            context["error_type"] = type(error).__name__
+            logger.exception("Unhandled request exception", extra=context)
+            response = JSONResponse(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                content={"detail": "Internal server error."},
+            )
+        else:
+            duration_ms = (perf_counter() - started) * 1_000
+            context = request_log_context(
+                request,
+                request_id,
+                response.status_code,
+                duration_ms,
+            )
+            if response.status_code >= 500:
+                log_method = logger.error
+            elif response.status_code >= 400:
+                log_method = logger.warning
+            else:
+                log_method = logger.info
+            log_method("Request completed", extra=context)
+
+        response.headers["X-Request-ID"] = request_id
+        response.headers["X-Process-Time-Ms"] = f"{duration_ms:.3f}"
+        return response
+
     def get_connection() -> Iterator[sqlite3.Connection]:
         """Provide one transactional database connection per request."""
         with database_connection(configured_path) as connection:
@@ -59,10 +139,20 @@ def create_app(database_path: str | Path | None = None) -> FastAPI:
     @application.exception_handler(sqlite3.DatabaseError)
     async def handle_database_error(
         request: Request,
-        _: sqlite3.DatabaseError,
+        error: sqlite3.DatabaseError,
     ) -> JSONResponse:
         """Log database failures while returning clients a safe response."""
-        logger.exception("Database failure while handling %s", request.url.path)
+        logger.exception(
+            "Database request failed",
+            extra={
+                "event": "database_error",
+                "request_id": request.state.request_id,
+                "method": request.method,
+                "path": request.url.path,
+                "status_code": status.HTTP_503_SERVICE_UNAVAILABLE,
+                "error_type": type(error).__name__,
+            },
+        )
         return JSONResponse(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             content={"detail": "The database is temporarily unavailable."},
