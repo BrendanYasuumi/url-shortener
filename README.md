@@ -17,11 +17,15 @@ HTTP interface and Python's standard `sqlite3` driver for persistent storage.
 - Isolated API, database, algorithm, concurrency, and benchmark tests
 - Configurable 500-request concurrent benchmark
 - Multi-stage, non-root Docker image with persistent storage and health checks
+- Continuous integration for automated tests and container smoke testing
 
 ## Architecture
 
 ```text
 url-shortener/
+├── .github/
+│   └── workflows/
+│       └── ci.yml        # Automated tests and Docker verification
 ├── app/
 │   ├── __init__.py
 │   ├── database.py       # Schema, connection lifecycle, transactions, queries
@@ -229,6 +233,21 @@ The current suite contains 78 collected cases covering:
 
 Every API test receives a new temporary SQLite file, so tests never modify the
 development database or depend on execution order.
+
+## Continuous integration
+
+GitHub Actions runs the following independent checks for every push to `main`
+and every pull request targeting `main`:
+
+1. **Python tests** — installs the pinned dependencies on Python 3.11 and runs
+   the complete pytest suite.
+2. **Docker build and smoke test** — builds the production image, starts a
+   container, and verifies that its HTTP health endpoint responds successfully.
+
+The workflow can also be started manually from the repository's **Actions**
+tab. Dependency caching avoids downloading unchanged Python packages on every
+run, and concurrency control cancels an obsolete run when a newer commit is
+pushed to the same branch.
 
 ## Benchmark
 
