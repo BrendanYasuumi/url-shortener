@@ -20,6 +20,7 @@ HTTP interface and Python's standard `sqlite3` driver for persistent storage.
 - Continuous integration for automated tests and container smoke testing
 - Reusable Postman collection with success and error-response checks
 - Structured JSON request logs with correlation IDs and response timing
+- Isolated SQLite benchmark for indexed reads and redirect transactions
 
 ## Architecture
 
@@ -41,10 +42,12 @@ url-shortener/
 ├── tests/
 │   ├── test_benchmark.py
 │   ├── test_database.py
+│   ├── test_database_benchmark.py
 │   ├── test_main.py
 │   ├── test_schemas.py
 │   └── test_utils.py
 ├── benchmark.py
+├── database_benchmark.py
 ├── Dockerfile
 └── requirements.txt
 ```
@@ -271,7 +274,7 @@ Run the complete suite with:
 pytest -v
 ```
 
-The current suite contains 83 collected cases covering:
+The current suite contains 89 collected cases covering:
 
 - request validation;
 - Base62 boundaries, failures, and round trips;
@@ -304,7 +307,12 @@ tab. Dependency caching avoids downloading unchanged Python packages on every
 run, and concurrency control cancels an obsolete run when a newer commit is
 pushed to the same branch.
 
-## Benchmark
+## Benchmarks
+
+The project separates HTTP benchmark results from database measurements so
+each result has a precise meaning.
+
+### End-to-end redirect benchmark
 
 Start the API without development reload or per-request logging overhead:
 
@@ -336,7 +344,7 @@ python benchmark.py --requests 1000 --concurrency 75 --timeout 20
 python benchmark.py --base-url http://127.0.0.1:9000
 ```
 
-### Sample local result
+#### Sample local result
 
 The following result was measured on an Apple M4 MacBook Pro with 16 GB memory,
 Python 3.11.16, one Uvicorn process, a fresh local SQLite database, disabled
@@ -356,6 +364,56 @@ Maximum latency: 465.75 ms
 
 These are end-to-end local HTTP measurements, not isolated SQL lookup times or
 production guarantees. Results will vary with hardware and system load.
+
+### SQLite database benchmark
+
+Run the isolated benchmark without starting the API:
+
+```bash
+python database_benchmark.py
+```
+
+By default, it inserts 100,000 deterministic URLs into a temporary database,
+executes 1,000 untimed warm-up reads, and then reports separate distributions
+for:
+
+- 10,000 successful indexed lookups using an already-open connection;
+- 10,000 indexed lookups for missing codes;
+- 1,000 configured connection open-and-close lifecycles; and
+- 1,000 complete redirect database transactions, including connection setup,
+  atomic click update, destination lookup, and commit.
+
+It also prints Python, SQLite, operating-system, database-size, and query-plan
+metadata. The default temporary database is deleted automatically. To retain a
+fresh database or change the workload:
+
+```bash
+python database_benchmark.py --database local-benchmark.db
+python database_benchmark.py --rows 250000 --lookups 25000
+```
+
+The explicit path must not already exist, preventing accidental replacement of
+application data. Results are informational rather than CI assertions because
+latency depends on hardware, filesystem state, and concurrent system load.
+
+#### Sample local database result
+
+The following was measured on the same Apple M4 MacBook Pro using Python
+3.11.16, SQLite 3.53.4, a 100,000-row 10.20 MiB database, and the default
+workload:
+
+| Operation | Samples | Average | Median | p95 | p99 | Maximum |
+|---|---:|---:|---:|---:|---:|---:|
+| Indexed lookup, found | 10,000 | 0.0030 ms | 0.0030 ms | 0.0036 ms | 0.0039 ms | 0.0114 ms |
+| Indexed lookup, missing | 10,000 | 0.0016 ms | 0.0016 ms | 0.0017 ms | 0.0020 ms | 0.0071 ms |
+| Connection open and close | 1,000 | 0.0327 ms | 0.0320 ms | 0.0354 ms | 0.0374 ms | 0.0929 ms |
+| Redirect database transaction | 1,000 | 0.3664 ms | 0.3470 ms | 0.5040 ms | 0.6161 ms | 0.7708 ms |
+
+SQLite reported `SEARCH urls USING INDEX` rather than a full table scan. The
+indexed lookup therefore met the local target of under 5 ms average latency in
+this warm-cache, single-process experiment. The redirect transaction result
+includes connection creation, an atomic write, a destination read, and commit,
+but still excludes FastAPI and network overhead.
 
 ## Docker
 
