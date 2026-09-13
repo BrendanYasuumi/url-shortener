@@ -9,6 +9,7 @@ HTTP interface and Python's standard `sqlite3` driver for persistent storage.
 - HTTP and HTTPS URL validation with Pydantic v2
 - Unique six-character codes using Base62 (`0-9`, `a-z`, and `A-Z`)
 - Transactional SQLite persistence
+- Transactional, versioned SQLite schema migrations
 - Explicitly indexed short-code lookups
 - Atomic click increments under concurrent requests
 - `307 Temporary Redirect` responses that preserve complete destination URLs
@@ -31,7 +32,7 @@ url-shortener/
 │       └── ci.yml        # Automated tests and Docker verification
 ├── app/
 │   ├── __init__.py
-│   ├── database.py       # Schema, connection lifecycle, transactions, queries
+│   ├── database.py       # Migrations, connections, transactions, and queries
 │   ├── logging_config.py # Structured application logging configuration
 │   ├── main.py           # FastAPI application, dependencies, and routes
 │   ├── schemas.py        # Pydantic request and response contracts
@@ -266,6 +267,20 @@ allows readers and a writer to make progress concurrently, while the timeout
 lets overlapping writers wait briefly instead of immediately failing with a
 locked-database error.
 
+### Schema migrations
+
+SQLite's `PRAGMA user_version` records which application schema version a
+database has reached. On startup, pending migrations run sequentially before
+FastAPI begins accepting requests. Each version obtains a write lock, applies
+its SQL, updates `user_version`, and commits as one transaction.
+
+Migration 1 represents the original URL schema. Its idempotent statements let
+the application adopt databases created before version tracking was added
+without deleting their URLs or analytics. A failed migration rolls back its
+partial changes, while completed earlier versions remain intact. The
+application refuses to modify a database whose version is newer than the code
+understands.
+
 ## Tests
 
 Run the complete suite with:
@@ -274,11 +289,12 @@ Run the complete suite with:
 pytest -v
 ```
 
-The current suite contains 89 collected cases covering:
+The current suite contains 95 collected cases covering:
 
 - request validation;
 - Base62 boundaries, failures, and round trips;
 - schema constraints and defaults;
+- migration ordering, compatibility, rollback, and version checks;
 - commit and rollback behavior;
 - indexed query planning;
 - URL persistence and application restarts;
@@ -463,5 +479,5 @@ sharing one SQLite file, network filesystems, or sustained high write volume are
 outside the intended architecture.
 
 A larger public service would typically add authentication for private
-analytics, rate limiting, abuse controls, backups, schema migrations, structured
-observability, HTTPS termination, and a client-independent public base URL.
+analytics, rate limiting, abuse controls, backups, HTTPS termination, and a
+client-independent public base URL.

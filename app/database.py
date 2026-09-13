@@ -1,24 +1,37 @@
-"""SQLite connection management, schema initialization, and URL persistence."""
+"""SQLite connection management, schema migrations, and URL persistence."""
 
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from pathlib import Path
 import sqlite3
+from types import MappingProxyType
+from typing import Final
 
 from app.utils import encode_base62
 
 
-SCHEMA_SQL = """
-CREATE TABLE IF NOT EXISTS urls (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    original_url TEXT NOT NULL,
-    short_code TEXT UNIQUE,
-    clicks INTEGER NOT NULL DEFAULT 0 CHECK (clicks >= 0),
-    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
+# Keys are target schema versions and values are the SQL statements needed to
+# reach that version. Never edit a released migration: add the next numbered
+# entry so existing databases follow the same history as new databases.
+MIGRATIONS: Final[Mapping[int, tuple[str, ...]]] = MappingProxyType({
+    1: (
+        """
+        CREATE TABLE IF NOT EXISTS urls (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            original_url TEXT NOT NULL,
+            short_code TEXT UNIQUE,
+            clicks INTEGER NOT NULL DEFAULT 0 CHECK (clicks >= 0),
+            created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+        """,
+        "CREATE INDEX IF NOT EXISTS idx_urls_short_code ON urls(short_code)",
+    ),
+})
+LATEST_SCHEMA_VERSION: Final[int] = max(MIGRATIONS)
 
-CREATE INDEX IF NOT EXISTS idx_urls_short_code ON urls(short_code);
-"""
+
+class UnsupportedDatabaseVersionError(RuntimeError):
+    """Raised when a database was created by newer application code."""
 
 
 def create_connection(database_path: str | Path) -> sqlite3.Connection:
@@ -46,20 +59,102 @@ def create_connection(database_path: str | Path) -> sqlite3.Connection:
     return connection
 
 
-def initialize_database(database_path: str | Path) -> None:
-    """Create the database directory, URL table, and lookup index when absent.
+def get_schema_version(connection: sqlite3.Connection) -> int:
+    """Return the application schema version stored in SQLite's file header."""
+    row = connection.execute("PRAGMA user_version").fetchone()
+    if row is None:
+        raise sqlite3.DatabaseError("SQLite did not return a schema version")
+    return int(row[0])
 
-    The operation is idempotent: running it repeatedly preserves existing data
-    because the schema uses ``IF NOT EXISTS``.
+
+def migrate_database(
+    connection: sqlite3.Connection,
+    migrations: Mapping[int, tuple[str, ...]] | None = None,
+) -> int:
+    """Apply pending schema migrations in order and return the final version.
+
+    Each version runs in its own ``BEGIN IMMEDIATE`` transaction. The write
+    lock is acquired before checking ``user_version``, preventing concurrent
+    application startups from applying the same migration. A failed version is
+    rolled back without undoing previously completed versions.
+
+    Args:
+        connection: Open SQLite connection with no active transaction.
+        migrations: Optional migration plan used by focused tests. Production
+            callers use the module's immutable migration history.
+
+    Raises:
+        UnsupportedDatabaseVersionError: If the database is newer than the
+            supplied migration plan.
+        ValueError: If migration versions are not consecutive from version 1.
+        sqlite3.DatabaseError: If a migration statement fails.
+    """
+    migration_plan = MIGRATIONS if migrations is None else migrations
+    latest_version = max(migration_plan, default=0)
+    expected_versions = set(range(1, latest_version + 1))
+    if set(migration_plan) != expected_versions:
+        raise ValueError("migration versions must be consecutive starting at 1")
+    if connection.in_transaction:
+        raise sqlite3.ProgrammingError(
+            "migrations require a connection without an active transaction"
+        )
+
+    while True:
+        connection.execute("BEGIN IMMEDIATE")
+        try:
+            current_version = get_schema_version(connection)
+            if current_version > latest_version:
+                raise UnsupportedDatabaseVersionError(
+                    "database schema version "
+                    f"{current_version} is newer than supported version "
+                    f"{latest_version}"
+                )
+            if current_version == latest_version:
+                connection.commit()
+                return current_version
+
+            target_version = current_version + 1
+            for statement in migration_plan[target_version]:
+                connection.execute(statement)
+
+            # SQLite does not accept bound parameters in PRAGMA assignments.
+            # target_version comes only from the trusted migration mapping.
+            connection.execute(f"PRAGMA user_version = {target_version}")
+            connection.commit()
+            if target_version == latest_version:
+                return target_version
+        except Exception:
+            connection.rollback()
+            raise
+
+
+def initialize_database(database_path: str | Path) -> None:
+    """Create or migrate the configured SQLite database to the latest schema.
+
+    Version zero represents either a new file or the original unversioned
+    schema. Migration 1 uses idempotent DDL, so both cases are upgraded without
+    deleting existing rows.
     """
     path = Path(database_path)
     path.parent.mkdir(parents=True, exist_ok=True)
 
-    with database_connection(path) as connection:
+    connection = create_connection(path)
+    try:
+        # Reject future schemas before changing the persistent journal mode.
+        current_version = get_schema_version(connection)
+        if current_version > LATEST_SCHEMA_VERSION:
+            raise UnsupportedDatabaseVersionError(
+                "database schema version "
+                f"{current_version} is newer than supported version "
+                f"{LATEST_SCHEMA_VERSION}"
+            )
+
         # WAL is a persistent database setting. Configuring it during
         # initialization avoids asking every request to change journal modes.
         connection.execute("PRAGMA journal_mode = WAL")
-        connection.executescript(SCHEMA_SQL)
+        migrate_database(connection)
+    finally:
+        connection.close()
 
 
 def create_url_record(
