@@ -34,6 +34,10 @@ class UnsupportedDatabaseVersionError(RuntimeError):
     """Raised when a database was created by newer application code."""
 
 
+class ShortCodeAlreadyExistsError(ValueError):
+    """Raised when a requested custom alias already belongs to another URL."""
+
+
 def create_connection(database_path: str | Path) -> sqlite3.Connection:
     """Open and configure a connection to a SQLite database file.
 
@@ -160,36 +164,67 @@ def initialize_database(database_path: str | Path) -> None:
 def create_url_record(
     connection: sqlite3.Connection,
     original_url: str,
+    custom_alias: str | None = None,
 ) -> sqlite3.Row:
-    """Insert an original URL, derive its Base62 code, and return the new row.
+    """Insert an original URL with a requested alias or generated Base62 code.
 
-    The caller controls the transaction. Inserting first lets SQLite assign the
-    unique integer ID; that ID is then encoded and saved on the same row.
+    The caller controls the transaction. Without an alias, inserting first lets
+    SQLite assign an integer ID that is encoded and saved on the same row. If a
+    custom alias already occupies that generated code, the incomplete row is
+    deleted and a new ID is allocated until a free code is found.
 
     Args:
         connection: Open SQLite connection used for the transaction.
         original_url: Validated destination URL to persist.
+        custom_alias: Optional validated code requested by the client.
 
     Returns:
         The complete database row, including its short code and timestamp.
 
     Raises:
         sqlite3.DatabaseError: If SQLite cannot provide or retrieve the new row.
+        ShortCodeAlreadyExistsError: If ``custom_alias`` is already in use.
         ValueError: If the generated ID exceeds six-character Base62 capacity.
     """
-    cursor = connection.execute(
-        "INSERT INTO urls (original_url) VALUES (?)",
-        (original_url,),
-    )
-    url_id = cursor.lastrowid
-    if url_id is None:
-        raise sqlite3.DatabaseError("SQLite did not return an inserted row ID")
+    if custom_alias is not None:
+        try:
+            cursor = connection.execute(
+                "INSERT INTO urls (original_url, short_code) VALUES (?, ?)",
+                (original_url, custom_alias),
+            )
+        except sqlite3.IntegrityError as error:
+            # The API validates both values before this function runs, leaving
+            # the unique short_code constraint as the possible conflict.
+            raise ShortCodeAlreadyExistsError(custom_alias) from error
 
-    short_code = encode_base62(url_id)
-    connection.execute(
-        "UPDATE urls SET short_code = ? WHERE id = ?",
-        (short_code, url_id),
-    )
+        if cursor.lastrowid is None:
+            raise sqlite3.DatabaseError("SQLite did not return an inserted row ID")
+        url_id = cursor.lastrowid
+    else:
+        while True:
+            cursor = connection.execute(
+                "INSERT INTO urls (original_url) VALUES (?)",
+                (original_url,),
+            )
+            url_id = cursor.lastrowid
+            if url_id is None:
+                raise sqlite3.DatabaseError(
+                    "SQLite did not return an inserted row ID"
+                )
+
+            short_code = encode_base62(url_id)
+            try:
+                connection.execute(
+                    "UPDATE urls SET short_code = ? WHERE id = ?",
+                    (short_code, url_id),
+                )
+            except sqlite3.IntegrityError:
+                # A custom alias may have claimed the code corresponding to
+                # this numeric ID. Remove the placeholder and advance SQLite's
+                # AUTOINCREMENT sequence to obtain the next candidate.
+                connection.execute("DELETE FROM urls WHERE id = ?", (url_id,))
+                continue
+            break
 
     row = connection.execute(
         "SELECT * FROM urls WHERE id = ?",

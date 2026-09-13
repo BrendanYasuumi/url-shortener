@@ -14,6 +14,7 @@ from fastapi.responses import JSONResponse, RedirectResponse, Response
 from starlette.middleware.base import RequestResponseEndpoint
 
 from app.database import (
+    ShortCodeAlreadyExistsError,
     create_url_record,
     database_connection,
     find_url_by_short_code,
@@ -80,7 +81,7 @@ def create_app(database_path: str | Path | None = None) -> FastAPI:
     application = FastAPI(
         title="URL Shortener API",
         description="Create compact short links and track redirect analytics.",
-        version="0.2.0",
+        version="0.3.0",
         lifespan=lifespan,
     )
 
@@ -167,7 +168,10 @@ def create_app(database_path: str | Path | None = None) -> FastAPI:
         "/shorten",
         response_model=ShortenResponse,
         status_code=status.HTTP_201_CREATED,
-        responses={503: {"model": ErrorResponse}},
+        responses={
+            409: {"model": ErrorResponse},
+            503: {"model": ErrorResponse},
+        },
         tags=["URLs"],
         summary="Create a short URL",
     )
@@ -177,7 +181,17 @@ def create_app(database_path: str | Path | None = None) -> FastAPI:
         connection: sqlite3.Connection = Depends(get_connection),
     ) -> ShortenResponse:
         """Persist a validated destination and return its new short link."""
-        row = create_url_record(connection, str(payload.url))
+        try:
+            row = create_url_record(
+                connection,
+                str(payload.url),
+                payload.custom_alias,
+            )
+        except ShortCodeAlreadyExistsError as error:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Custom alias is already in use.",
+            ) from error
         return ShortenResponse(
             original_url=row["original_url"],
             short_code=row["short_code"],

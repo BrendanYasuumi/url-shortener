@@ -156,6 +156,65 @@
             "url": "{{base_url}}/analytics/{{short_code}}"
           },
           "response": []
+        },
+        {
+          "name": "Create custom alias",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.collectionVariables.set(\"custom_alias\", \"postman-\" + Date.now());"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status code is 201\", function () {",
+                  "    pm.response.to.have.status(201);",
+                  "});",
+                  "",
+                  "const body = pm.response.json();",
+                  "const expectedAlias = pm.variables.get(\"custom_alias\");",
+                  "",
+                  "pm.test(\"Response contains the requested alias\", function () {",
+                  "    pm.expect(body.short_code).to.equal(expectedAlias);",
+                  "});",
+                  "",
+                  "pm.test(\"Short URL ends with the requested alias\", function () {",
+                  "    const expectedSuffix = \"/\" + expectedAlias;",
+                  "    pm.expect(body.short_url.slice(-expectedSuffix.length)).to.equal(expectedSuffix);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"url\": \"{{destination_url}}\",\n  \"custom_alias\": \"{{custom_alias}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "Create a rerunnable, timestamped custom alias for the duplicate-conflict check.",
+            "url": "{{base_url}}/shorten"
+          },
+          "response": []
         }
       ]
     },
@@ -201,6 +260,50 @@
               }
             },
             "description": "Demonstrate Pydantic rejecting a value that is not an absolute HTTP or HTTPS URL.",
+            "url": "{{base_url}}/shorten"
+          },
+          "response": []
+        },
+        {
+          "name": "Reject duplicate custom alias",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status code is 409\", function () {",
+                  "    pm.response.to.have.status(409);",
+                  "});",
+                  "",
+                  "pm.test(\"Response explains the alias conflict\", function () {",
+                  "    pm.expect(pm.response.json()).to.deep.equal({",
+                  "        detail: \"Custom alias is already in use.\"",
+                  "    });",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"url\": \"https://example.com/duplicate-attempt\",\n  \"custom_alias\": \"{{custom_alias}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "Attempt to claim the alias created by the earlier happy-path request.",
             "url": "{{base_url}}/shorten"
           },
           "response": []
@@ -283,6 +386,11 @@
     {
       "key": "short_code",
       "value": "000001",
+      "type": "string"
+    },
+    {
+      "key": "custom_alias",
+      "value": "postman-alias",
       "type": "string"
     }
   ]

@@ -1,6 +1,6 @@
 # URL Shortener and Analytics API
 
-A RESTful backend service for creating fixed-width short links, redirecting
+A RESTful backend service for creating compact short links, redirecting
 visitors, and tracking aggregate link usage. The service uses FastAPI for its
 HTTP interface and Python's standard `sqlite3` driver for persistent storage.
 
@@ -8,13 +8,14 @@ HTTP interface and Python's standard `sqlite3` driver for persistent storage.
 
 - HTTP and HTTPS URL validation with Pydantic v2
 - Unique six-character codes using Base62 (`0-9`, `a-z`, and `A-Z`)
+- Optional, conflict-safe custom URL aliases
 - Transactional SQLite persistence
 - Transactional, versioned SQLite schema migrations
 - Explicitly indexed short-code lookups
 - Atomic click increments under concurrent requests
 - `307 Temporary Redirect` responses that preserve complete destination URLs
 - Analytics containing the original URL, code, total clicks, and creation time
-- Safe `404`, `422`, and `503` error responses
+- Safe `404`, `409`, `422`, `500`, and `503` error responses
 - Isolated API, database, algorithm, concurrency, and benchmark tests
 - Configurable 500-request concurrent benchmark
 - Multi-stage, non-root Docker image with persistent storage and health checks
@@ -58,10 +59,10 @@ The main creation flow is:
 ```text
 POST /shorten
   -> validate JSON
-  -> insert original URL
-  -> receive SQLite ID
-  -> encode ID as six-character Base62
-  -> update and commit the row
+  -> custom alias supplied?
+       yes -> claim it through SQLite's unique constraint
+       no  -> insert URL, encode its ID as Base62, avoid occupied codes
+  -> commit the row
   -> return 201 Created
 ```
 
@@ -81,9 +82,10 @@ Interactive OpenAPI documentation is available from a running server at
 | `GET` | `/{short_code}` | `307` | Record a click and redirect to the destination |
 | `GET` | `/analytics/{short_code}` | `200` | Retrieve URL metadata and total clicks |
 
-Invalid request bodies return `422`. Unknown short codes return `404`.
-Unexpected SQLite failures are logged internally and returned as a safe `503`
-without exposing database details.
+Invalid request bodies return `422`. Unknown short codes return `404`, and an
+alias that is already owned returns `409`. Unexpected SQLite failures are
+logged internally and returned as a safe `503` without exposing database
+details.
 
 Every response includes two observability headers:
 
@@ -112,6 +114,19 @@ Example response from a new database:
   "created_at": "2026-09-09T12:00:00"
 }
 ```
+
+To request a custom alias, include `custom_alias`:
+
+```bash
+curl -i -X POST http://127.0.0.1:8000/shorten \
+  -H 'Content-Type: application/json' \
+  -d '{"url":"https://example.com/portfolio","custom_alias":"my-portfolio"}'
+```
+
+Aliases contain 3–32 lowercase letters, digits, or internal hyphens. They
+cannot begin or end with a hyphen. The API-owned names `analytics`, `docs`,
+`redoc`, and `shorten` are reserved. Claiming an existing alias returns
+`409 Conflict` and leaves its original destination unchanged.
 
 ### Inspect a redirect
 
@@ -158,10 +173,11 @@ analytics requests then reuse. Redirect following is disabled for redirect
 checks, so Postman inspects the API's `307` response without contacting the
 external destination.
 
-The seven saved requests check the complete successful workflow as well as
-invalid-URL and unknown-code errors. Their post-response scripts verify status
-codes, response bodies, the `Location` header, the Base62 code format, and the
-recorded click count.
+The nine saved requests check generated and custom creation workflows as well
+as invalid-URL, duplicate-alias, and unknown-code errors. Their 21
+post-response assertions verify status codes, response bodies, the `Location`
+header, the Base62 code format, alias propagation, and the recorded click
+count.
 
 ## Observability
 
@@ -219,7 +235,7 @@ URL_SHORTENER_DB_PATH=/absolute/path/to/urls.db \
   uvicorn app.main:app --reload
 ```
 
-## Base62 codes
+## Short codes and custom aliases
 
 The database assigns each URL an auto-incremented integer ID. The application
 converts that ID into Base62 and pads the result to six characters:
@@ -236,6 +252,12 @@ Six Base62 positions represent `62^6`, or 56,800,235,584 values. Inputs outside
 that fixed-width range fail explicitly rather than producing longer codes.
 Encoding database IDs guarantees uniqueness, but the resulting codes are
 predictable and are not intended to function as secrets.
+
+Custom aliases and generated codes share one unique database namespace. A
+custom alias consumes a normal row ID. If an alias has already claimed the
+six-character code for a future ID, automatic generation deletes its temporary
+row and advances to the next available ID. Consequently, IDs and generated
+codes can contain harmless gaps, while every public short code remains unique.
 
 ## Database design
 
@@ -289,7 +311,7 @@ Run the complete suite with:
 pytest -v
 ```
 
-The current suite contains 95 collected cases covering:
+The current suite contains 117 collected cases covering:
 
 - request validation;
 - Base62 boundaries, failures, and round trips;
@@ -298,6 +320,7 @@ The current suite contains 95 collected cases covering:
 - commit and rollback behavior;
 - indexed query planning;
 - URL persistence and application restarts;
+- custom-alias validation, conflicts, and concurrent ownership;
 - status codes and redirect headers;
 - click analytics;
 - safe database failures;

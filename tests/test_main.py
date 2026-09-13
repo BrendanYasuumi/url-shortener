@@ -80,6 +80,104 @@ def test_shorten_assigns_unique_sequential_codes(client: TestClient) -> None:
     assert second.json()["short_code"] == "000002"
 
 
+def test_shorten_creates_requested_custom_alias(client: TestClient) -> None:
+    """A valid available alias should replace automatic Base62 generation."""
+    destination = "https://example.com/portfolio"
+
+    response = client.post(
+        "/shorten",
+        json={"url": destination, "custom_alias": "my-portfolio"},
+    )
+
+    assert response.status_code == 201
+    assert response.json()["short_code"] == "my-portfolio"
+    assert response.json()["short_url"] == "http://testserver/my-portfolio"
+
+    redirect = client.get("/my-portfolio", follow_redirects=False)
+    analytics = client.get("/analytics/my-portfolio")
+    assert redirect.status_code == 307
+    assert redirect.headers["location"] == destination
+    assert analytics.status_code == 200
+    assert analytics.json()["clicks"] == 1
+
+
+def test_duplicate_custom_alias_returns_409_without_replacing_original(
+    client: TestClient,
+) -> None:
+    """Alias ownership should be protected by the database unique constraint."""
+    first_destination = "https://example.com/first-owner"
+    second_destination = "https://example.com/second-owner"
+    first = client.post(
+        "/shorten",
+        json={"url": first_destination, "custom_alias": "shared-alias"},
+    )
+
+    duplicate = client.post(
+        "/shorten",
+        json={"url": second_destination, "custom_alias": "shared-alias"},
+    )
+    redirect = client.get("/shared-alias", follow_redirects=False)
+
+    assert first.status_code == 201
+    assert duplicate.status_code == 409
+    assert duplicate.json() == {"detail": "Custom alias is already in use."}
+    assert redirect.headers["location"] == first_destination
+
+
+def test_generated_code_skips_alias_that_reserved_a_future_id(
+    client: TestClient,
+    database_path: Path,
+) -> None:
+    """Custom aliases must never make automatic code creation fail."""
+    custom = client.post(
+        "/shorten",
+        json={
+            "url": "https://example.com/custom-owner",
+            "custom_alias": "000002",
+        },
+    )
+    generated = client.post(
+        "/shorten",
+        json={"url": "https://example.com/generated-owner"},
+    )
+
+    with database_connection(database_path) as connection:
+        rows = connection.execute(
+            "SELECT id, short_code FROM urls ORDER BY id"
+        ).fetchall()
+
+    assert custom.status_code == 201
+    assert generated.status_code == 201
+    assert generated.json()["short_code"] == "000003"
+    assert [(row["id"], row["short_code"]) for row in rows] == [
+        (1, "000002"),
+        (3, "000003"),
+    ]
+
+
+def test_concurrent_requests_cannot_claim_the_same_custom_alias(
+    client: TestClient,
+) -> None:
+    """Exactly one writer should win a simultaneous alias claim."""
+    request_count = 10
+
+    def claim_alias(index: int) -> int:
+        response = client.post(
+            "/shorten",
+            json={
+                "url": f"https://example.com/claim/{index}",
+                "custom_alias": "one-owner",
+            },
+        )
+        return response.status_code
+
+    with ThreadPoolExecutor(max_workers=request_count) as executor:
+        status_codes = list(executor.map(claim_alias, range(request_count)))
+
+    assert status_codes.count(201) == 1
+    assert status_codes.count(409) == request_count - 1
+
+
 @pytest.mark.parametrize(
     "payload",
     [
@@ -87,6 +185,8 @@ def test_shorten_assigns_unique_sequential_codes(client: TestClient) -> None:
         {"url": "not a url"},
         {"url": "ftp://example.com/file"},
         {"url": "https://example.com", "unknown_field": True},
+        {"url": "https://example.com", "custom_alias": "-invalid"},
+        {"url": "https://example.com", "custom_alias": "docs"},
     ],
 )
 def test_shorten_returns_422_for_invalid_payloads(
